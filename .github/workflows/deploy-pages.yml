@@ -3,7 +3,7 @@ name: Build v3.1.0 All Versions and Deploy ZIPs
 on:
   push:
     branches: [ master, main ]
-  workflow_dispatch: # 支持手动点击运行
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,7 +14,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 补全了从 5.1 到 5.4 的所有主流版本
         luaVersion: [ "5.1", "5.2", "5.3", "5.4" ]
         platform: [ "windows-2022" ]
         arch: [ "x64", "x86" ]
@@ -43,35 +42,56 @@ jobs:
         shell: pwsh
         run: |
           $spec = Get-ChildItem -Path . -Filter "luasocket*.rockspec" | Select-Object -ExpandProperty Name -First 1
-          luarocks make -- "$spec"
+          # 强制指定在当前目录安装，方便提取产物
+          luarocks make --tree ./install_tree "$spec"
 
-      - name: Organize and Zip
-        shell: pwsh
+      - name: Organize and Zip (Python Deep Search)
+        shell: python
         run: |
-          # 1. 创建符合 Lua 加载规则的目录结构
-          $stage = "stage"
-          New-Item -ItemType Directory -Force -Path "$stage/socket"
-          New-Item -ItemType Directory -Force -Path "$stage/mime"
+          import os
+          import shutil
+          import zipfile
 
-          # 2. 提取并重命名 DLL (核心逻辑：socket.dll -> socket/core.dll)
-          $socketDll = Get-ChildItem -Path . -Filter "socket.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
-          $mimeDll = Get-ChildItem -Path . -Filter "mime.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
-          
-          if ($socketDll) { Copy-Item $socketDll -Destination "$stage/socket/core.dll" -Force }
-          if ($mimeDll) { Copy-Item $mimeDll -Destination "$stage/mime/core.dll" -Force }
-          
-          # 3. 拷贝所有配套的 .lua 脚本
-          if (Test-Path "src") {
-              Copy-Item "src/*.lua" -Destination "$stage/" -ErrorAction SilentlyContinue
-          }
+          # 1. 创建 stage 结构
+          os.makedirs("stage/socket", exist_ok=True)
+          os.makedirs("stage/mime", exist_ok=True)
 
-          # 4. 打包成 ZIP
-          $zipName = "luasocket-v3.1.0-lua${{ matrix.luaVersion }}-${{ matrix.arch }}.zip"
-          Compress-Archive -Path "$stage/*" -DestinationPath "$zipName"
+          # 2. 暴力搜索 DLL
+          # luarocks 在 Windows 编译后可能把 dll 放在 ./install_tree/lib 或 ./src
+          for root, dirs, files in os.walk("."):
+              for f in files:
+                  full_path = os.path.join(root, f)
+                  # 找到 socket.dll 或核心 dll
+                  if f.lower() == "socket.dll" or (f.lower() == "core.dll" and "socket" in root.lower()):
+                      shutil.copy2(full_path, "stage/socket/core.dll")
+                      print(f"Found Socket DLL at: {full_path}")
+                  elif f.lower() == "mime.dll" or (f.lower() == "core.dll" and "mime" in root.lower()):
+                      shutil.copy2(full_path, "stage/mime/core.dll")
+                      print(f"Found Mime DLL at: {full_path}")
+
+          # 3. 拷贝 Lua 脚本 (通常在 src 目录下)
+          src_dir = "src"
+          if os.path.exists(src_dir):
+              for f in os.listdir(src_dir):
+                  if f.endswith(".lua"):
+                      shutil.copy2(os.path.join(src_dir, f), "stage/")
+
+          # 4. 检查是否真的抓到了 DLL，没抓到就报错阻止发布
+          if not os.path.exists("stage/socket/core.dll"):
+              raise Exception("CRITICAL ERROR: socket/core.dll not found after build!")
+
+          # 5. 打包 ZIP
+          zip_name = f"luasocket-v3.1.0-lua${{ matrix.luaVersion }}-${{ matrix.arch }}.zip"
+          with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as z:
+              for root, dirs, files in os.walk("stage"):
+                  for f in files:
+                      fp = os.path.join(root, f)
+                      # 保持 stage 内部的相对路径
+                      arcname = os.path.relpath(fp, "stage")
+                      z.write(fp, arcname)
           
-          # 5. 准备上传
-          New-Item -ItemType Directory -Force -Path "publish"
-          Move-Item $zipName "publish/"
+          os.makedirs("publish", exist_ok=True)
+          shutil.move(zip_name, os.path.join("publish", zip_name))
 
       - name: Upload Intermediate
         uses: actions/upload-artifact@v4
@@ -93,28 +113,17 @@ jobs:
         shell: python
         run: |
           import os
-          from datetime import datetime
-
-          zips = [f for f in os.listdir('final-zips') if f.endswith('.zip')]
-          zips.sort()
-          
+          zips = sorted([f for f in os.listdir('final-zips') if f.endswith('.zip')])
           with open('final-zips/index.html', 'w', encoding='utf-8') as f:
-              f.write("<html><head><title>LuaSocket v3.1.0 Downloads</title>")
-              f.write("<style>body{font-family:sans-serif;padding:40px;} li{margin:10px 0;} a{text-decoration:none;color:#0366d6;} a:hover{text-decoration:underline;}</style>")
-              f.write("</head><body>")
-              f.write("<h1>LuaSocket v3.1.0 Windows Builds</h1>")
-              f.write("<p><b>Usage:</b> Extract the ZIP to your project. It includes the required <code>socket/core.dll</code> and <code>mime/core.dll</code> structure.</p>")
-              f.write("<hr><ul>")
+              f.write("<html><body><h1>LuaSocket v3.1.0 Windows Builds</h1><ul>")
               for z in zips:
                   f.write(f'<li><a href="{z}">📦 {z}</a></li>')
-              f.write("</ul><hr>")
-              f.write(f"<p style='color:grey'>Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>")
-              f.write("</body></html>")
+              f.write("</ul></body></html>")
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./final-zips
+          publish_dir: ./final-dist
           publish_branch: gh-pages
-          keep_files: false # 保持干净，每次运行只保留这 8 个最新的 ZIP
+          keep_files: false
