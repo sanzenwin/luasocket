@@ -42,43 +42,44 @@ jobs:
         shell: pwsh
         run: |
           $spec = Get-ChildItem -Path . -Filter "luasocket*.rockspec" | Select-Object -ExpandProperty Name -First 1
-          # 强制安装到当前目录的 local_tree 文件夹
+          # 明确指定 tree 路径
           luarocks make --tree ./local_tree "$spec"
 
-      - name: "Debug: List All Files"
+      - name: Precise Collection and Zip
         shell: pwsh
         run: |
-          Write-Host "--- START OF DIRECTORY LOG ---"
-          # 打印当前目录下所有文件及子目录
-          Get-ChildItem -Path . -Recurse | Select-Object FullName
-          Write-Host "--- END OF DIRECTORY LOG ---"
-
-      - name: Organize and Zip
-        shell: pwsh
-        run: |
-          $stage = "final_stage"
+          $stage = "zip_stage"
+          $luaVer = "${{ matrix.luaVersion }}"
+          
+          # 1. 创建目标目录
           New-Item -ItemType Directory -Force -Path "$stage/socket"
           New-Item -ItemType Directory -Force -Path "$stage/mime"
 
-          # 搜索所有的 dll
-          $sDll = Get-ChildItem -Path . -Filter "socket.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
-          $mDll = Get-ChildItem -Path . -Filter "mime.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
+          # 2. 根据日志显示的路径，定点拷贝核心 DLL
+          # 日志显示路径格式为: local_tree/lib/lua/<version>/<module>/core.dll
+          $dllBase = "local_tree/lib/lua/$luaVer"
+          
+          if (Test-Path "$dllBase/socket/core.dll") {
+              Copy-Item "$dllBase/socket/core.dll" -Destination "$stage/socket/" -Force
+              Write-Host "Collected socket core.dll"
+          } else { throw "Missing socket core.dll at $dllBase/socket/core.dll" }
 
-          if ($sDll) { 
-              Copy-Item $sDll -Destination "$stage/socket/core.dll" -Force 
-              Write-Host "Captured socket.dll from $sDll"
+          if (Test-Path "$dllBase/mime/core.dll") {
+              Copy-Item "$dllBase/mime/core.dll" -Destination "$stage/mime/" -Force
+              Write-Host "Collected mime core.dll"
+          } else { throw "Missing mime core.dll at $dllBase/mime/core.dll" }
+
+          # 3. 拷贝 Lua 脚本（从 src 目录获取最新的）
+          $luaFiles = @("ltn12.lua", "mime.lua", "socket.lua")
+          foreach ($f in $luaFiles) {
+              if (Test-Path "src/$f") { Copy-Item "src/$f" -Destination "$stage/" }
           }
-          if ($mDll) { 
-              Copy-Item $mDll -Destination "$stage/mime/core.dll" -Force 
-              Write-Host "Captured mime.dll from $mDll"
+          if (Test-Path "src/socket") {
+              Copy-Item "src/socket/*.lua" -Destination "$stage/socket/" -Force
           }
 
-          if (Test-Path "src") {
-              Copy-Item "src/*.lua" -Destination "$stage/" -ErrorAction SilentlyContinue
-          }
-
-          # 打包 ZIP
-          $zipName = "luasocket-v3.1.0-lua${{ matrix.luaVersion }}-${{ matrix.arch }}.zip"
+          # 4. 压缩
+          $zipName = "luasocket-v3.1.0-lua$luaVer-${{ matrix.arch }}.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath "$zipName"
           
           New-Item -ItemType Directory -Force -Path "publish"
@@ -101,15 +102,15 @@ jobs:
           merge-multiple: true
 
       - name: Generate Index HTML
+        shell: bash
         run: |
           cd final-zips
           echo "<html><body style='font-family:sans-serif;padding:50px;'>" > index.html
           echo "<h1>LuaSocket v3.1.0 Windows Builds</h1><hr><ul>" >> index.html
-          # 列出所有 zip 文件并生成链接
           ls *.zip | sort | while read line; do
             echo "<li><a href='$line' style='line-height:2;font-size:1.2em;'>$line</a></li>" >> index.html
           done
-          echo "</ul></body></html>" >> index.html
+          echo "</ul><p style='color:gray;margin-top:40px;'>Contains: socket/core.dll, mime/core.dll, and all .lua scripts.</p></body></html>" >> index.html
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
