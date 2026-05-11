@@ -42,53 +42,47 @@ jobs:
         shell: pwsh
         run: |
           $spec = Get-ChildItem -Path . -Filter "luasocket*.rockspec" | Select-Object -ExpandProperty Name -First 1
-          # 关键：指定安装树，防止 DLL 被塞进系统临时文件夹
+          # 强制安装到当前目录的 local_tree 文件夹
           luarocks make --tree ./local_tree "$spec"
 
-      - name: Organize and Zip (Python Deep Search)
-        shell: python
+      - name: "Debug: List All Files"
+        shell: pwsh
         run: |
-          import os, shutil, zipfile
+          Write-Host "--- START OF DIRECTORY LOG ---"
+          # 打印当前目录下所有文件及子目录
+          Get-ChildItem -Path . -Recurse | Select-Object FullName
+          Write-Host "--- END OF DIRECTORY LOG ---"
 
-          # 1. 创建符合 Lua 规范的结构
-          base_dir = "stage"
-          os.makedirs(f"{base_dir}/socket", exist_ok=True)
-          os.makedirs(f"{base_dir}/mime", exist_ok=True)
+      - name: Organize and Zip
+        shell: pwsh
+        run: |
+          $stage = "final_stage"
+          New-Item -ItemType Directory -Force -Path "$stage/socket"
+          New-Item -ItemType Directory -Force -Path "$stage/mime"
 
-          # 2. 暴力搜索 DLL。无论在 local_tree 还是 src 还是根目录，全给找出来
-          for root, dirs, files in os.walk("."):
-              for f in files:
-                  full_path = os.path.join(root, f).replace("\\", "/")
-                  if "stage" in full_path: continue # 避开自己
-                  
-                  if f.lower() == "socket.dll":
-                      shutil.copy2(full_path, f"{base_dir}/socket/core.dll")
-                      print(f"Captured: {full_path} -> socket/core.dll")
-                  elif f.lower() == "mime.dll":
-                      shutil.copy2(full_path, f"{base_dir}/mime/core.dll")
-                      print(f"Captured: {full_path} -> mime/core.dll")
+          # 搜索所有的 dll
+          $sDll = Get-ChildItem -Path . -Filter "socket.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
+          $mDll = Get-ChildItem -Path . -Filter "mime.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
 
-          # 3. 拷贝 Lua 源码
-          src_dir = "src"
-          if os.path.exists(src_dir):
-              for f in os.listdir(src_dir):
-                  if f.endswith(".lua"):
-                      shutil.copy2(os.path.join(src_dir, f), base_dir)
+          if ($sDll) { 
+              Copy-Item $sDll -Destination "$stage/socket/core.dll" -Force 
+              Write-Host "Captured socket.dll from $sDll"
+          }
+          if ($mDll) { 
+              Copy-Item $mDll -Destination "$stage/mime/core.dll" -Force 
+              Write-Host "Captured mime.dll from $mDll"
+          }
 
-          # 4. 安全检查：如果没搜到 DLL，直接报错，不浪费时间发布
-          if not os.path.exists(f"{base_dir}/socket/core.dll"):
-              raise Exception("Error: socket.dll was not found after build!")
+          if (Test-Path "src") {
+              Copy-Item "src/*.lua" -Destination "$stage/" -ErrorAction SilentlyContinue
+          }
 
-          # 5. 打包
-          zip_name = f"luasocket-v3.1.0-lua${{ matrix.luaVersion }}-${{ matrix.arch }}.zip"
-          with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as z:
-              for r, d, fs in os.walk(base_dir):
-                  for file in fs:
-                      fp = os.path.join(r, file)
-                      z.write(fp, os.path.relpath(fp, base_dir))
+          # 打包 ZIP
+          $zipName = "luasocket-v3.1.0-lua${{ matrix.luaVersion }}-${{ matrix.arch }}.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath "$zipName"
           
-          os.makedirs("publish", exist_ok=True)
-          shutil.move(zip_name, f"publish/{zip_name}")
+          New-Item -ItemType Directory -Force -Path "publish"
+          Move-Item $zipName "publish/"
 
       - name: Upload Intermediate
         uses: actions/upload-artifact@v4
@@ -106,18 +100,16 @@ jobs:
           path: final-zips/
           merge-multiple: true
 
-      - name: Generate Simple Index
-        shell: python
+      - name: Generate Index HTML
         run: |
-          import os
-          zips = sorted([f for f in os.listdir('final-zips') if f.endswith('.zip')])
-          with open('final-zips/index.html', 'w', encoding='utf-8') as f:
-              f.write("<html><body style='font-family:sans-serif; padding:50px;'>")
-              f.write("<h1>LuaSocket v3.1.0 Downloads (ZIP)</h1><ul>")
-              for z in zips:
-                  f.write(f'<li><a href="{z}" style="font-size:1.2em; line-height:2;">{z}</a></li>')
-              f.write("</ul><p style='margin-top:50px; color:gray;'>Contains: socket/core.dll, mime/core.dll and lua scripts.</p>")
-              f.write("</body></html>")
+          cd final-zips
+          echo "<html><body style='font-family:sans-serif;padding:50px;'>" > index.html
+          echo "<h1>LuaSocket v3.1.0 Windows Builds</h1><hr><ul>" >> index.html
+          # 列出所有 zip 文件并生成链接
+          ls *.zip | sort | while read line; do
+            echo "<li><a href='$line' style='line-height:2;font-size:1.2em;'>$line</a></li>" >> index.html
+          done
+          echo "</ul></body></html>" >> index.html
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
