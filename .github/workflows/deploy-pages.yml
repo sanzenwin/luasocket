@@ -3,7 +3,7 @@ name: Build v3.1.0 and Deploy to Pages
 on:
   push:
     branches: [ master, main ]
-  workflow_dispatch: # 支持手动点击运行
+  workflow_dispatch: # 支持在 Actions 页面手动点击运行
 
 permissions:
   contents: write
@@ -14,6 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 你可以根据需要添加 5.3, 5.2 等
         luaVersion: [ "5.4", "5.1" ]
         platform: [ "windows-2022" ]
         arch: [ "x64", "x86" ]
@@ -24,7 +25,7 @@ jobs:
       - name: Checkout v3.1.0
         uses: actions/checkout@v4
         with:
-          ref: v3.1.0 # 强制指定检出 tag v3.1.0
+          ref: v3.1.0
 
       - name: Setup 'msvc'
         uses: ilammy/msvc-dev-cmd@v1
@@ -40,9 +41,12 @@ jobs:
         uses: luarocks/gh-actions-luarocks@master
 
       - name: Make and Build
-        # v3.1.0 稳定版使用 rockspec 编译是最稳妥的
+        shell: pwsh
         run: |
-          luarocks make -- luasocket-3.1.0-1.rockspec
+          # 动态查找 rockspec 文件名，避免版本号变动导致的 File Not Found
+          $spec = Get-ChildItem -Path . -Filter "luasocket*.rockspec" | Select-Object -ExpandProperty Name -First 1
+          Write-Host "Using rockspec: $spec"
+          luarocks make -- "$spec"
         env:
           DEBUG: DEBUG
 
@@ -53,17 +57,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$outPath/socket"
           New-Item -ItemType Directory -Force -Path "$outPath/mime"
 
-          # v3.1.0 编译后的 dll 通常位于 src 目录
-          # 我们将其重命名为 core.dll 以符合 Lua 的 require 逻辑
-          if (Test-Path "src/socket.dll") {
-              Copy-Item "src/socket.dll" -Destination "$outPath/socket/core.dll"
+          # 递归搜索所有目录，防止 LuaRocks 把 DLL 产物放在非预期位置
+          # 找到后强制重命名为 core.dll 并移动到 publish 目录
+          $socketDll = Get-ChildItem -Path . -Filter "socket.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
+          $mimeDll = Get-ChildItem -Path . -Filter "mime.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
+
+          if ($socketDll) { 
+              Copy-Item $socketDll -Destination "$outPath/socket/core.dll" -Force 
+              Write-Host "Found and copied socket.dll from $socketDll"
           }
-          if (Test-Path "src/mime.dll") {
-              Copy-Item "src/mime.dll" -Destination "$outPath/mime/core.dll"
+          if ($mimeDll) { 
+              Copy-Item $mimeDll -Destination "$outPath/mime/core.dll" -Force 
+              Write-Host "Found and copied mime.dll from $mimeDll"
           }
 
-          # 拷贝对应的 lua 脚本组件
-          Copy-Item "src/*.lua" -Destination "$outPath/"
+          # 拷贝 Lua 脚本组件 (http.lua, url.lua 等)
+          if (Test-Path "src") {
+              Copy-Item "src/*.lua" -Destination "$outPath/" -ErrorAction SilentlyContinue
+          }
 
       - name: Upload Intermediate Artifacts
         uses: actions/upload-artifact@v4
@@ -87,4 +98,4 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./final-dist
           publish_branch: gh-pages
-          keep_files: true # 保持多版本共存
+          keep_files: true # 允许不同架构、不同 Lua 版本的产物在同一分支共存
