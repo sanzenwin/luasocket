@@ -1,4 +1,4 @@
-name: Build v3.1.0 and Deploy to Pages
+name: Build v3.1.0 and Deploy ZIPs
 
 on:
   push:
@@ -44,73 +44,67 @@ jobs:
           $spec = Get-ChildItem -Path . -Filter "luasocket*.rockspec" | Select-Object -ExpandProperty Name -First 1
           luarocks make -- "$spec"
 
-      - name: Organize Artifacts
+      - name: Organize and Zip
         shell: pwsh
         run: |
-          $outPath = "publish/v3.1.0/lua${{ matrix.luaVersion }}/${{ matrix.arch }}"
-          New-Item -ItemType Directory -Force -Path "$outPath/socket"
-          New-Item -ItemType Directory -Force -Path "$outPath/mime"
+          # 创建临时整理目录
+          $stage = "stage/socket"
+          $mimeStage = "stage/mime"
+          New-Item -ItemType Directory -Force -Path $stage
+          New-Item -ItemType Directory -Force -Path $mimeStage
 
+          # 提取 DLL 并规范化命名
           $socketDll = Get-ChildItem -Path . -Filter "socket.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
           $mimeDll = Get-ChildItem -Path . -Filter "mime.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
-          if ($socketDll) { Copy-Item $socketDll -Destination "$outPath/socket/core.dll" -Force }
-          if ($mimeDll) { Copy-Item $mimeDll -Destination "$outPath/mime/core.dll" -Force }
-          if (Test-Path "src") { Copy-Item "src/*.lua" -Destination "$outPath/" -ErrorAction SilentlyContinue }
+          if ($socketDll) { Copy-Item $socketDll -Destination "$stage/core.dll" }
+          if ($mimeDll) { Copy-Item $mimeDll -Destination "$mimeStage/core.dll" }
+          
+          # 拷贝 Lua 脚本到 stage 根目录
+          if (Test-Path "src") { Copy-Item "src/*.lua" -Destination "stage/" }
 
-      - name: Upload Intermediate Artifacts
+          # 打包成 ZIP
+          $zipName = "luasocket-v3.1.0-lua${{ matrix.luaVersion }}-${{ matrix.arch }}.zip"
+          Compress-Archive -Path "stage/*" -DestinationPath "$zipName"
+          
+          # 准备上传
+          New-Item -ItemType Directory -Force -Path "publish"
+          Move-Item $zipName "publish/"
+
+      - name: Upload Intermediate
         uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.luaVersion }}-${{ matrix.arch }}
-          path: publish/
+          name: zip-${{ matrix.luaVersion }}-${{ matrix.arch }}
+          path: publish/*.zip
 
   deploy:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Download All Artifacts
+      - name: Download All ZIPs
         uses: actions/download-artifact@v4
         with:
-          path: final-dist/
+          path: final-zips/
           merge-multiple: true
 
-      - name: Python Recursive Index Generator
+      - name: Generate Simple Index
         shell: python
         run: |
           import os
-
-          root_dir = os.path.abspath("final-dist")
-
-          for root, dirs, files in os.walk(root_dir):
-              # 准备 HTML 内容
-              rel_path = os.path.relpath(root, root_dir)
-              display_path = "Root" if rel_path == "." else rel_path
-              
-              html = [f"<html><head><title>Index of {display_path}</title></head>"]
-              html.append(f"<body><h1>Index of {display_path}</h1><hr><ul>")
-              
-              # 添加上级目录链接
-              if rel_path != ".":
-                  html.append('<li><a href="../">.. (Parent Directory)</a></li>')
-              
-              # 添加子目录链接
-              for d in sorted(dirs):
-                  html.append(f'<li><a href="{d}/">{d}/</a></li>')
-              
-              # 添加文件链接
-              for f in sorted(files):
-                  if f == "index.html": continue
-                  html.append(f'<li><a href="{f}">{f}</a></li>')
-              
-              html.append("</ul><hr></body></html>")
-              
-              # 写入该目录下的 index.html
-              with open(os.path.join(root, "index.html"), "w", encoding="utf-8") as f:
-                  f.write("\n".join(html))
+          zips = [f for f in os.listdir('final-zips') if f.endswith('.zip')]
+          zips.sort()
+          
+          with open('final-zips/index.html', 'w') as f:
+              f.write("<html><head><title>LuaSocket v3.1.0 Download</title></head><body>")
+              f.write("<h1>LuaSocket v3.1.0 Windows Builds (ZIP)</h1>")
+              f.write("<p>Each ZIP contains: socket/core.dll, mime/core.dll, and all .lua scripts.</p><ul>")
+              for z in zips:
+                  f.write(f'<li><a href="{z}"><strong>{z}</strong></a></li>')
+              f.write("</ul><hr><p>Build Time: " + os.popen('date').read() + "</p></body></html>")
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./final-dist
+          publish_dir: ./final-zips
           publish_branch: gh-pages
-          keep_files: true
+          keep_files: false # 每次运行都以最新的 ZIP 为准，清空旧的防止混乱
