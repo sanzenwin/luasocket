@@ -51,25 +51,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$outPath/socket"
           New-Item -ItemType Directory -Force -Path "$outPath/mime"
 
-          # 提取 DLL
           $socketDll = Get-ChildItem -Path . -Filter "socket.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
           $mimeDll = Get-ChildItem -Path . -Filter "mime.dll" -Recurse | Select-Object -ExpandProperty FullName -First 1
           if ($socketDll) { Copy-Item $socketDll -Destination "$outPath/socket/core.dll" -Force }
           if ($mimeDll) { Copy-Item $mimeDll -Destination "$outPath/mime/core.dll" -Force }
-
-          # 拷贝 Lua 脚本
-          if (Test-Path "src") {
-              Copy-Item "src/*.lua" -Destination "$outPath/" -ErrorAction SilentlyContinue
-          }
-
-          # --- 关键修改：在当前架构目录下生成 index.html ---
-          $indexContent = "<html><body><h1>Files for Lua${{ matrix.luaVersion }} ${{ matrix.arch }}</h1><ul>"
-          Get-ChildItem -Path $outPath -Recurse | ForEach-Object {
-              $relPath = $_.FullName.Replace((Get-Item $outPath).FullName, "").TrimStart("\").Replace("\", "/")
-              if ($relPath) { $indexContent += "<li><a href='./$relPath'>$relPath</a></li>" }
-          }
-          $indexContent += "</ul><a href='../../'>Back</a></body></html>"
-          Set-Content -Path "$outPath/index.html" -Value $indexContent
+          if (Test-Path "src") { Copy-Item "src/*.lua" -Destination "$outPath/" -ErrorAction SilentlyContinue }
 
       - name: Upload Intermediate Artifacts
         uses: actions/upload-artifact@v4
@@ -87,15 +73,39 @@ jobs:
           path: final-dist/
           merge-multiple: true
 
-      - name: Generate Root Index
+      - name: Python Recursive Index Generator
+        shell: python
         run: |
-          cd final-dist
-          echo "<html><body><h1>LuaSocket Builds Index</h1><ul>" > index.html
-          find . -name "index.html" -not -path "./index.html" | sort | while read -r file; do
-            dir=$(dirname "$file" | sed 's|./||')
-            echo "<li><a href=\"$dir/\">$dir</a></li>" >> index.html
-          done
-          echo "</ul></body></html>" >> index.html
+          import os
+
+          root_dir = os.path.abspath("final-dist")
+
+          for root, dirs, files in os.walk(root_dir):
+              # 准备 HTML 内容
+              rel_path = os.path.relpath(root, root_dir)
+              display_path = "Root" if rel_path == "." else rel_path
+              
+              html = [f"<html><head><title>Index of {display_path}</title></head>"]
+              html.append(f"<body><h1>Index of {display_path}</h1><hr><ul>")
+              
+              # 添加上级目录链接
+              if rel_path != ".":
+                  html.append('<li><a href="../">.. (Parent Directory)</a></li>')
+              
+              # 添加子目录链接
+              for d in sorted(dirs):
+                  html.append(f'<li><a href="{d}/">{d}/</a></li>')
+              
+              # 添加文件链接
+              for f in sorted(files):
+                  if f == "index.html": continue
+                  html.append(f'<li><a href="{f}">{f}</a></li>')
+              
+              html.append("</ul><hr></body></html>")
+              
+              # 写入该目录下的 index.html
+              with open(os.path.join(root, "index.html"), "w", encoding="utf-8") as f:
+                  f.write("\n".join(html))
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
