@@ -1,0 +1,90 @@
+name: Build v3.1.0 and Deploy to Pages
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch: # 支持手动点击运行
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Lua ${{ matrix.luaVersion }} (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        luaVersion: [ "5.4", "5.1" ]
+        platform: [ "windows-2022" ]
+        arch: [ "x64", "x86" ]
+        
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout v3.1.0
+        uses: actions/checkout@v4
+        with:
+          ref: v3.1.0 # 强制指定检出 tag v3.1.0
+
+      - name: Setup 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Setup 'lua'
+        uses: luarocks/gh-actions-lua@v10
+        with:
+          luaVersion: ${{ matrix.luaVersion }}
+
+      - name: Setup 'luarocks'
+        uses: luarocks/gh-actions-luarocks@master
+
+      - name: Make and Build
+        # v3.1.0 稳定版使用 rockspec 编译是最稳妥的
+        run: |
+          luarocks make -- luasocket-3.1.0-1.rockspec
+        env:
+          DEBUG: DEBUG
+
+      - name: Organize Artifacts
+        shell: pwsh
+        run: |
+          $outPath = "publish/v3.1.0/lua${{ matrix.luaVersion }}/${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path "$outPath/socket"
+          New-Item -ItemType Directory -Force -Path "$outPath/mime"
+
+          # v3.1.0 编译后的 dll 通常位于 src 目录
+          # 我们将其重命名为 core.dll 以符合 Lua 的 require 逻辑
+          if (Test-Path "src/socket.dll") {
+              Copy-Item "src/socket.dll" -Destination "$outPath/socket/core.dll"
+          }
+          if (Test-Path "src/mime.dll") {
+              Copy-Item "src/mime.dll" -Destination "$outPath/mime/core.dll"
+          }
+
+          # 拷贝对应的 lua 脚本组件
+          Copy-Item "src/*.lua" -Destination "$outPath/"
+
+      - name: Upload Intermediate Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.luaVersion }}-${{ matrix.arch }}
+          path: publish/
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: final-dist/
+          merge-multiple: true
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./final-dist
+          publish_branch: gh-pages
+          keep_files: true # 保持多版本共存
